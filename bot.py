@@ -1,12 +1,5 @@
 import logging
 import logging.config
-
-# Get logging configurations
-logging.config.fileConfig('logging.conf')
-logging.getLogger().setLevel(logging.INFO)
-logging.getLogger("pyrogram").setLevel(logging.ERROR)
-logging.getLogger("imdbpy").setLevel(logging.ERROR)
-
 from pyrogram import Client, __version__
 from pyrogram.raw.all import layer
 from database.ia_filterdb import Media, Media2, choose_mediaDB, db as clientDB
@@ -19,9 +12,15 @@ from Script import script
 from datetime import date, datetime 
 import pytz
 from sample_info import tempDict
+from pymongo import MongoClient
+
+# Setup logging configuration
+logging.config.fileConfig('logging.conf', disable_existing_loggers=False)
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger("pyrogram").setLevel(logging.ERROR)
+logging.getLogger("imdbpy").setLevel(logging.ERROR)
 
 class Bot(Client):
-
     def __init__(self):
         super().__init__(
             name=SESSION,
@@ -34,33 +33,47 @@ class Bot(Client):
         )
 
     async def start(self):
+        # Fetch banned users and chats
         b_users, b_chats = await db.get_banned()
         temp.BANNED_USERS = b_users
         temp.BANNED_CHATS = b_chats
+
+        # Start bot
         await super().start()
+
+        # Ensure indexes on media collections
         await Media.ensure_indexes()
         await Media2.ensure_indexes()
-        #choose the right db by checking the free space
+
+        # Calculate primary database size and decide which DB to use
         stats = await clientDB.command('dbStats')
-        #calculating the free db space from bytes to MB
-        free_dbSize = round(512-((stats['dataSize']/(1024*1024))+(stats['indexSize']/(1024*1024))), 2)
-        if SECONDDB_URI and free_dbSize<10: #if the primary db have less than 10MB left, use second DB.
+        free_dbSize = round(512 - ((stats['dataSize'] / (1024 * 1024)) + (stats['indexSize'] / (1024 * 1024))), 2)
+
+        if SECONDDB_URI and free_dbSize < 10:  # Switch to secondary DB if space is less than 10MB
             tempDict["indexDB"] = SECONDDB_URI
-            logging.info(f"Since Primary DB have only {free_dbSize} MB left, Secondary DB will be used to store datas.")
+            logging.info(f"Primary DB space is low ({free_dbSize} MB left), using secondary DB.")
         elif SECONDDB_URI is None:
-            logging.error("Missing second DB URI !\n\nAdd SECONDDB_URI now !\n\nExiting...")
+            logging.error("Missing SECONDDB_URI! Exiting...")
             exit()
         else:
-            logging.info(f"Since primary DB have enough space ({free_dbSize}MB) left, It will be used for storing datas.")
+            logging.info(f"Primary DB has enough space ({free_dbSize} MB), continuing to use it.")
+
+        # Choose the right media DB
         await choose_mediaDB()
+
+        # Get bot info and set global variables
         me = await self.get_me()
         temp.ME = me.id
         temp.U_NAME = me.username
         temp.B_NAME = me.first_name
         self.username = '@' + me.username
-        logging.info(f"{me.first_name} with for Pyrogram v{__version__} (Layer {layer}) started on {me.username}.")
+
+        # Log bot startup info
+        logging.info(f"{me.first_name} (Pyrogram v{__version__}, Layer {layer}) started on {me.username}.")
         logging.info(LOG_STR)
         logging.info(script.LOGO)
+
+        # Send restart notification to log channel
         tz = pytz.timezone('Asia/Kolkata')
         today = date.today()
         now = datetime.now(tz)
@@ -68,6 +81,7 @@ class Bot(Client):
         await self.send_message(chat_id=LOG_CHANNEL, text=script.RESTART_TXT.format(today, time))
 
     async def stop(self, *args):
+        # Stop bot
         await super().stop()
         logging.info("Bot stopped. Bye.")
 
@@ -77,39 +91,43 @@ class Bot(Client):
         limit: int,
         offset: int = 0,
     ) -> Optional[AsyncGenerator["types.Message", None]]:
-        """Iterate through a chat sequentially.
-        This convenience method does the same as repeatedly calling :meth:`~pyrogram.Client.get_messages` in a loop, thus saving
-        you from the hassle of setting up boilerplate code. It is useful for getting the whole chat messages with a
-        single call.
-        Parameters:
-            chat_id (``int`` | ``str``):
-                Unique identifier (int) or username (str) of the target chat.
-                For your personal cloud (Saved Messages) you can simply use "me" or "self".
-                For a contact that exists in your Telegram address book you can use his phone number (str).
-                
-            limit (``int``):
-                Identifier of the last message to be returned.
-                
-            offset (``int``, *optional*):
-                Identifier of the first message to be returned.
-                Defaults to 0.
-        Returns:
-            ``Generator``: A generator yielding :obj:`~pyrogram.types.Message` objects.
-        Example:
-            .. code-block:: python
-                for message in app.iter_messages("pyrogram", 1, 15000):
-                    print(message.text)
-        """
+        """Iterate through a chat's messages sequentially."""
         current = offset
         while True:
             new_diff = min(200, limit - current)
             if new_diff <= 0:
                 return
-            messages = await self.get_messages(chat_id, list(range(current, current+new_diff+1)))
+            messages = await self.get_messages(chat_id, list(range(current, current + new_diff + 1)))
             for message in messages:
                 yield message
                 current += 1
 
+# Main entry point for the bot
+if __name__ == "__main__":
+    try:
+        app = Bot()
 
-app = Bot()
-app.run()
+        # Test MongoDB connection before running
+        primary_db_uri = "mongodb+srv://spideyofficial777:SPIDEY777@spidey777.pykfj.mongodb.net/SPIDEYDB?retryWrites=true&w=majority&appName=SPIDEY777"
+        try:
+            client = MongoClient(primary_db_uri)
+            client.server_info()  # Test primary DB connection
+            logging.info("Primary MongoDB connection successful!")
+        except Exception as e:
+            logging.error(f"Primary MongoDB connection failed: {e}")
+            if SECONDDB_URI:
+                logging.info("Attempting to connect to secondary DB...")
+                try:
+                    secondary_client = MongoClient(SECONDDB_URI)
+                    secondary_client.server_info()  # Test secondary DB connection
+                    logging.info("Secondary MongoDB connection successful!")
+                except Exception as e:
+                    logging.error(f"Secondary MongoDB connection failed: {e}")
+                    exit()
+
+        # Run the bot
+        app.run()
+
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")
+        exit()
